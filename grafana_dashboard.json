@@ -1,0 +1,83 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "dora-metrics",
+    "title": "DORA Metrics Dashboard",
+    "tags": ["dora", "devops"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 0,
+    "refresh": "5s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Deployment Frequency",
+        "type": "graph",
+        "datasource": "Supabase",
+        "targets": [
+          {
+            "rawSql": "SELECT metric_date AS time, deployment_frequency FROM dora_metrics WHERE repo_id = $repo_id",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Lead Time for Changes",
+        "type": "graph",
+        "datasource": "Supabase",
+        "targets": [
+          {
+            "rawSql": "SELECT metric_date AS time, lead_time_hours FROM dora_metrics WHERE repo_id = $repo_id",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Change Failure Rate",
+        "type": "gauge",
+        "datasource": "Supabase",
+        "targets": [
+          {
+            "rawSql": "SELECT change_failure_rate FROM dora_metrics WHERE repo_id = $repo_id ORDER BY metric_date DESC LIMIT 1",
+            "format": "table",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
+      },
+      {
+        "id": 4,
+        "title": "Time to Restore Service",
+        "type": "graph",
+        "datasource": "Supabase",
+        "targets": [
+          {
+            "rawSql": "SELECT metric_date AS time, mttr_hours FROM dora_metrics WHERE repo_id = $repo_id",
+            "format": "time_series",
+            "refId": "A"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 16, "x": 8, "y": 8}
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "repo_id",
+          "label": "Repository",
+          "type": "query",
+          "datasource": "Supabase",
+          "query": "SELECT DISTINCT repo_id FROM dora_metrics",
+          "refresh": 1
+        }
+      ]
+    }
+  },
+  "overwrite": true
+}
