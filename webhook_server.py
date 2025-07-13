@@ -227,6 +227,41 @@ def get_logs():
         cursor.close()
         conn.close()
 
+@app.route('/metrics', methods=['GET'])
+def get_latest_metrics():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT DISTINCT ON (repo_id)
+                repo_id, metric_date, deployment_frequency,
+                lead_time_hours, change_failure_rate, mttr_hours
+            FROM dora_metrics
+            ORDER BY repo_id, metric_date DESC
+        """)
+
+        rows = cursor.fetchall()
+        metrics = []
+        for row in rows:
+            metrics.append({
+                "repo_id": row[0],
+                "date": row[1].isoformat(),
+                "deployment_frequency": row[2],
+                "lead_time_hours": row[3],
+                "change_failure_rate": row[4],
+                "mttr_hours": row[5]
+            })
+
+        return jsonify({"metrics": metrics}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok"}), 200
