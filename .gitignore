@@ -5,3 +5,5 @@ __pycache__/
 .DS_Store
 venv/
 *.env
+.first_run_complete
+*.sqlite3
