@@ -8,7 +8,6 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 from db_utils import get_db_connection
 from dora_calculations import detect_production_deployment, median
-from webhook_processor import handle_deployment_event, handle_pull_request_event, handle_issues_event
 from db_utils import initialize_db
 from metrics_processor import process_metrics
 
