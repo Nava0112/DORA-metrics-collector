@@ -27,8 +27,11 @@ def is_production_deployment(environment, payload):
         logger.warning(f"Error checking production filter: {str(e)}")
     return False
 
+def daterange(start_date, end_date):
+    for n in range((end_date - start_date).days + 1):
+        yield start_date + timedelta(days=n)
+
 def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
-    # Get all successful deployments in the time window
     cursor.execute("""
         SELECT 
             d.deployment_id, d.commit_sha, d.created_at,
@@ -39,10 +42,8 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
             d.created_at BETWEEN %s AND %s AND
             d.status = 'success'
     """, (repo_id, start_time, end_time))
-    
     all_deployments = cursor.fetchall()
 
-    # Filter to production deployments
     prod_deployments = [
         (dep_id, commit_sha, created_at)
         for dep_id, commit_sha, created_at, environment, payload in all_deployments
@@ -51,7 +52,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
 
     deployment_count = len(prod_deployments)
 
-    # Lead Time for Changes
     lead_times = []
     for dep_id, commit_sha, deploy_time in prod_deployments:
         cursor.execute("""
@@ -64,7 +64,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
             lead_time = calculate_lead_time(first_commit, None, deploy_time)
             lead_times.append(lead_time)
 
-    # Handle direct commits
     prod_deployment_ids = tuple([d[0] for d in prod_deployments]) or (0,)
     cursor.execute(f"""
         SELECT d.created_at
@@ -83,7 +82,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
 
     median_lead_time = median(lead_times)
 
-    # Change Failure Rate
     cursor.execute("""
         SELECT COUNT(*)
         FROM incidents i
@@ -98,7 +96,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
 
     failure_rate = calculate_failure_rate(deployment_count, failed_deployments)
 
-    # Time to Restore Service
     mttr_times = []
     cursor.execute("""
         SELECT created_at, closed_at
@@ -109,13 +106,10 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
             closed_at IS NOT NULL AND
             closed_at BETWEEN %s AND %s
     """, (repo_id, start_time, end_time))
-    
     for created_at, closed_at in cursor.fetchall():
         mttr_times.append(calculate_mttr(created_at, closed_at))
-    
     median_mttr = median(mttr_times)
 
-    # Store results
     cursor.execute("""
         INSERT INTO dora_metrics (
             repo_id, metric_date, 
@@ -146,17 +140,24 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     }
 
 def process_metrics():
-    logger.info("Starting metrics processing...")
+    logger.info("Starting historical daily metrics processing...")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Calculate time window (previous day)
-        end_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        start_time = end_time - timedelta(days=1)
-        metric_date = start_time.date()
-        
-        # Get all repositories with activity
+
+        cursor.execute("""
+            SELECT MIN(min_date) FROM (
+                SELECT MIN(created_at) AS min_date FROM deployments
+                UNION
+                SELECT MIN(created_at) AS min_date FROM pull_requests
+                UNION
+                SELECT MIN(created_at) AS min_date FROM incidents
+            ) AS dates
+        """)
+        first_date_row = cursor.fetchone()
+        first_date = first_date_row[0].date() if first_date_row and first_date_row[0] else datetime.utcnow().date()
+        today = datetime.utcnow().date()
+
         cursor.execute("""
             SELECT DISTINCT repo_id FROM (
                 SELECT repo_id FROM deployments
@@ -165,19 +166,26 @@ def process_metrics():
             ) AS active_repos
         """)
         repos = [row[0] for row in cursor.fetchall()]
-        
+
         results = {}
-        for repo_id in repos:
-            logger.info(f"Processing metrics for repo: {repo_id}")
-            results[repo_id] = process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date)
-        
+        for single_date in daterange(first_date, today):
+            start_time = datetime.combine(single_date, datetime.min.time())
+            end_time = start_time + timedelta(days=1)
+            metric_date = single_date
+
+            for repo_id in repos:
+                logger.info(f"Processing metrics for repo: {repo_id} on {metric_date}")
+                results[(repo_id, metric_date)] = process_repo_metrics(
+                    cursor, repo_id, start_time, end_time, metric_date
+                )
+
         conn.commit()
-        logger.info("Metrics processing completed successfully")
+        logger.info("✅ Historical metrics processing completed successfully")
         return results
-        
+
     except Exception as e:
-        logger.error(f"Error processing metrics: {str(e)}")
+        logger.error(f"Error processing historical metrics: {str(e)}")
         return {}
     finally:
-        cursor.close()
-        conn.close()
+        if cursor: cursor.close()
+        if conn: conn.close()

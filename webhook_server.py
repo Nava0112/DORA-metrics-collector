@@ -7,7 +7,9 @@ import hashlib
 from flask import Flask, request, jsonify
 from datetime import datetime
 from db_utils import get_db_connection
-from dora_calculations import detect_production_deployment
+from dora_calculations import detect_production_deployment, median
+from webhook_processor import handle_deployment_event, handle_pull_request_event, handle_issues_event
+from db_utils import initialize_db
 from metrics_processor import process_metrics
 
 app = Flask(__name__)
@@ -78,21 +80,23 @@ def handle_pull_request_event(cursor, payload):
     created_at = datetime.strptime(pr['created_at'], '%Y-%m-%dT%H:%M:%SZ')
     merged_at = datetime.strptime(pr['merged_at'], '%Y-%m-%dT%H:%M:%SZ')
     first_commit_at = created_at
+    pr_name = pr.get('title', '')
 
     try:
         cursor.execute("""
             INSERT INTO pull_requests (
                 repo_id, pr_id, merged_at, created_at,
-                first_commit_at, base_branch, commit_sha, payload
+                first_commit_at, base_branch, commit_sha, pr_name, payload
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (pr_id) DO UPDATE SET
                 merged_at = EXCLUDED.merged_at,
                 commit_sha = EXCLUDED.commit_sha,
+                pr_name = EXCLUDED.pr_name,
                 payload = EXCLUDED.payload
         """, (
             repo_id, pr_id, merged_at, created_at,
-            first_commit_at, pr['base']['ref'], commit_sha, json.dumps(payload)
+            first_commit_at, pr['base']['ref'], commit_sha, pr_name, json.dumps(payload)
         ))
 
         if commit_sha:
@@ -100,6 +104,7 @@ def handle_pull_request_event(cursor, payload):
 
     except Exception as e:
         logger.error(f"Error storing PR: {str(e)}")
+
 
 def handle_issues_event(cursor, payload):
     if payload['action'] not in ['opened', 'closed', 'reopened', 'labeled', 'unlabeled']:
@@ -188,13 +193,28 @@ def get_logs():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT deployment_id, repo_id, environment, status, created_at FROM deployments ORDER BY created_at DESC LIMIT 20")
+        cursor.execute("""
+            SELECT deployment_id, repo_id, environment, status, created_at
+            FROM deployments
+            ORDER BY created_at DESC
+            LIMIT 20
+        """)
         deployments = cursor.fetchall()
 
-        cursor.execute("SELECT pr_id, repo_id, merged_at, base_branch FROM pull_requests ORDER BY merged_at DESC NULLS LAST LIMIT 20")
+        cursor.execute("""
+            SELECT pr_id, repo_id, merged_at, base_branch, pr_name
+            FROM pull_requests
+            ORDER BY merged_at DESC NULLS LAST
+            LIMIT 20
+        """)
         prs = cursor.fetchall()
 
-        cursor.execute("SELECT issue_id, repo_id, created_at, closed_at, is_incident FROM incidents ORDER BY created_at DESC LIMIT 20")
+        cursor.execute("""
+            SELECT issue_id, repo_id, created_at, closed_at, is_incident
+            FROM incidents
+            ORDER BY created_at DESC
+            LIMIT 20
+        """)
         incidents = cursor.fetchall()
 
         return jsonify({
@@ -208,7 +228,8 @@ def get_logs():
                 {
                     "pr_id": p[0], "repo_id": p[1],
                     "merged_at": p[2].isoformat() if p[2] else None,
-                    "base_branch": p[3]
+                    "base_branch": p[3],
+                    "pr_name": p[4]
                 } for p in prs
             ],
             "incidents": [
@@ -227,24 +248,25 @@ def get_logs():
         cursor.close()
         conn.close()
 
-@app.route('/metrics', methods=['GET'])
-def get_latest_metrics():
+# webhook_server.py
+@app.route('/daily_metrics', methods=['GET'])
+def get_daily_metrics():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-
         cursor.execute("""
-            SELECT DISTINCT ON (repo_id)
-                repo_id, metric_date, deployment_frequency,
-                lead_time_hours, change_failure_rate, mttr_hours
+            SELECT repo_id, metric_date, 
+                   deployment_frequency, 
+                   lead_time_hours,
+                   change_failure_rate,
+                   mttr_hours
             FROM dora_metrics
-            ORDER BY repo_id, metric_date DESC
+            ORDER BY metric_date DESC
+            LIMIT 30  -- Last 30 days
         """)
-
-        rows = cursor.fetchall()
-        metrics = []
-        for row in rows:
-            metrics.append({
+        results = []
+        for row in cursor.fetchall():
+            results.append({
                 "repo_id": row[0],
                 "date": row[1].isoformat(),
                 "deployment_frequency": row[2],
@@ -252,14 +274,95 @@ def get_latest_metrics():
                 "change_failure_rate": row[4],
                 "mttr_hours": row[5]
             })
-
-        return jsonify({"metrics": metrics}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"daily_metrics": results}), 200
     finally:
         cursor.close()
         conn.close()
+
+@app.route('/metrics', methods=['GET'])
+def get_overall_metrics():
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Get all distinct repos
+        cursor.execute("""
+            SELECT DISTINCT repo_id FROM (
+                SELECT repo_id FROM deployments
+                UNION
+                SELECT repo_id FROM pull_requests
+                UNION
+                SELECT repo_id FROM incidents
+            ) AS repos
+        """)
+        repos = [row[0] for row in cursor.fetchall()]
+
+        metrics = []
+
+        for repo_id in repos:
+            # Total successful deployments
+            cursor.execute("""
+                SELECT COUNT(*) FROM deployments
+                WHERE repo_id = %s AND status='success'
+            """, (repo_id,))
+            successful_deployments = cursor.fetchone()[0]
+
+            # Total deployments (for failure rate)
+            cursor.execute("""
+                SELECT COUNT(*) FROM deployments
+                WHERE repo_id = %s
+            """, (repo_id,))
+            total_deployments = cursor.fetchone()[0]
+
+            # Change Failure Rate
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.issue_id)
+                FROM incidents i
+                JOIN deployments d ON i.deployment_id = d.deployment_id
+                WHERE i.repo_id = %s AND i.is_incident = TRUE
+            """, (repo_id,))
+            failed_deployments = cursor.fetchone()[0]
+            failure_rate = (failed_deployments / total_deployments * 100) if total_deployments else 0.0
+
+            # Median Lead Time
+            cursor.execute("""
+                SELECT EXTRACT(EPOCH FROM (d.created_at - pr.first_commit_at)) / 3600.0
+                FROM deployment_prs dp
+                JOIN pull_requests pr ON dp.pr_id = pr.pr_id
+                JOIN deployments d ON dp.deployment_id = d.deployment_id
+                WHERE d.repo_id = %s AND pr.first_commit_at IS NOT NULL
+            """, (repo_id,))
+            lead_times = [row[0] for row in cursor.fetchall()]
+            median_lead_time = median(lead_times)
+
+            # Median MTTR
+            cursor.execute("""
+                SELECT EXTRACT(EPOCH FROM (closed_at - created_at)) / 3600.0
+                FROM incidents
+                WHERE repo_id = %s AND is_incident = TRUE AND closed_at IS NOT NULL
+            """, (repo_id,))
+            mttrs = [row[0] for row in cursor.fetchall()]
+            median_mttr = median(mttrs)
+
+            metrics.append({
+                "repo_id": repo_id,
+                "total_successful_deployments": successful_deployments,
+                "median_lead_time_hours": median_lead_time,
+                "change_failure_rate": failure_rate,
+                "median_mttr_hours": median_mttr
+            })
+
+        return jsonify({"overall_metrics": metrics}), 200
+
+    except Exception as e:
+        logger.error(f"Error computing overall metrics: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 
 
 @app.route('/health', methods=['GET'])
