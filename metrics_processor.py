@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 from datetime import datetime, timedelta
 from db_utils import get_db_connection
 from dora_calculations import (
@@ -12,39 +13,60 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
+PRODUCTION_KEYWORDS = ['production', 'prod', 'release', 'deploy', 'main', 'live']
+
+def is_production_deployment(environment, payload):
+    try:
+        if environment and any(k in environment.lower() for k in PRODUCTION_KEYWORDS):
+            return True
+        if payload:
+            payload_data = payload if isinstance(payload, dict) else json.loads(payload)
+            workflow_name = payload_data.get('workflow_run', {}).get('name', '').lower()
+            return any(k in workflow_name for k in PRODUCTION_KEYWORDS)
+    except Exception as e:
+        logger.warning(f"Error checking production filter: {str(e)}")
+    return False
+
 def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
-    # Deployment Frequency
-    cursor.execute("""
-        SELECT COUNT(*) 
-        FROM deployments
-        WHERE 
-            repo_id = %s AND
-            created_at BETWEEN %s AND %s AND
-            status = 'success'
-    """, (repo_id, start_time, end_time))
-    deployment_count = cursor.fetchone()[0] or 0
-    
-    # Lead Time for Changes
-    lead_times = []
+    # Get all successful deployments in the time window
     cursor.execute("""
         SELECT 
-            d.created_at AS deploy_time,
-            pr.first_commit_at
+            d.deployment_id, d.commit_sha, d.created_at,
+            d.environment, d.payload
         FROM deployments d
-        JOIN deployment_prs dp ON d.deployment_id = dp.deployment_id
-        JOIN pull_requests pr ON dp.pr_id = pr.pr_id
         WHERE 
             d.repo_id = %s AND
             d.created_at BETWEEN %s AND %s AND
             d.status = 'success'
     """, (repo_id, start_time, end_time))
     
-    for deploy_time, first_commit in cursor.fetchall():
-        lead_time = calculate_lead_time(first_commit, None, deploy_time)
-        lead_times.append(lead_time)
-    
+    all_deployments = cursor.fetchall()
+
+    # Filter to production deployments
+    prod_deployments = [
+        (dep_id, commit_sha, created_at)
+        for dep_id, commit_sha, created_at, environment, payload in all_deployments
+        if is_production_deployment(environment, payload)
+    ]
+
+    deployment_count = len(prod_deployments)
+
+    # Lead Time for Changes
+    lead_times = []
+    for dep_id, commit_sha, deploy_time in prod_deployments:
+        cursor.execute("""
+            SELECT pr.first_commit_at
+            FROM deployment_prs dp
+            JOIN pull_requests pr ON dp.pr_id = pr.pr_id
+            WHERE dp.deployment_id = %s
+        """, (dep_id,))
+        for (first_commit,) in cursor.fetchall():
+            lead_time = calculate_lead_time(first_commit, None, deploy_time)
+            lead_times.append(lead_time)
+
     # Handle direct commits
-    cursor.execute("""
+    prod_deployment_ids = tuple([d[0] for d in prod_deployments]) or (0,)
+    cursor.execute(f"""
         SELECT d.created_at
         FROM deployments d
         LEFT JOIN deployment_prs dp ON d.deployment_id = dp.deployment_id
@@ -52,14 +74,15 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
             d.repo_id = %s AND
             d.created_at BETWEEN %s AND %s AND
             d.status = 'success' AND
-            dp.pr_id IS NULL
-    """, (repo_id, start_time, end_time))
-    
+            dp.pr_id IS NULL AND
+            d.deployment_id IN %s
+    """, (repo_id, start_time, end_time, prod_deployment_ids))
+
     for (deploy_time,) in cursor.fetchall():
         lead_times.append(calculate_lead_time(deploy_time, None, deploy_time))
-    
+
     median_lead_time = median(lead_times)
-    
+
     # Change Failure Rate
     cursor.execute("""
         SELECT COUNT(*)
@@ -68,18 +91,17 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
         WHERE 
             i.repo_id = %s AND
             i.is_incident = TRUE AND
-            d.created_at BETWEEN %s AND %s
-    """, (repo_id, start_time, end_time))
+            d.created_at BETWEEN %s AND %s AND
+            d.deployment_id IN %s
+    """, (repo_id, start_time, end_time, prod_deployment_ids))
     failed_deployments = cursor.fetchone()[0] or 0
-    
+
     failure_rate = calculate_failure_rate(deployment_count, failed_deployments)
-    
+
     # Time to Restore Service
     mttr_times = []
     cursor.execute("""
-        SELECT 
-            created_at,
-            closed_at
+        SELECT created_at, closed_at
         FROM incidents
         WHERE 
             repo_id = %s AND
@@ -92,7 +114,7 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
         mttr_times.append(calculate_mttr(created_at, closed_at))
     
     median_mttr = median(mttr_times)
-    
+
     # Store results
     cursor.execute("""
         INSERT INTO dora_metrics (
@@ -115,7 +137,7 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
         failure_rate,
         median_mttr
     ))
-    
+
     return {
         'deployments': deployment_count,
         'lead_time': median_lead_time,
