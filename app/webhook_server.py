@@ -8,9 +8,9 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 from db_utils import get_db_connection
 from dora_calculations import detect_production_deployment, median
-from webhook_processor import handle_deployment_event, handle_pull_request_event, handle_issues_event
 from db_utils import initialize_db
 from metrics_processor import process_metrics
+from github_auth import get_installation_token  
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -81,11 +81,12 @@ def handle_pull_request_event(cursor, payload):
     merged_at = datetime.strptime(pr['merged_at'], '%Y-%m-%dT%H:%M:%SZ')
     pr_name = pr.get('title', '')
 
-    # 🔥 Fetch actual first commit date
+    # 🔥 Fetch actual first commit date using GitHub App token
     try:
         commits_url = pr['_links']['commits']['href']
+        token = get_installation_token()
         commits_resp = requests.get(commits_url, headers={
-            "Authorization": f"token {os.getenv('GITHUB_TOKEN')}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json"
         })
         commits = commits_resp.json()
@@ -267,7 +268,6 @@ def get_logs():
         cursor.close()
         conn.close()
 
-# webhook_server.py
 @app.route('/daily_metrics', methods=['GET'])
 def get_daily_metrics():
     try:
@@ -281,7 +281,7 @@ def get_daily_metrics():
                    mttr_hours
             FROM dora_metrics
             ORDER BY metric_date DESC
-            LIMIT 30  -- Last 30 days
+            LIMIT 30
         """)
         results = []
         for row in cursor.fetchall():
@@ -306,7 +306,6 @@ def get_overall_metrics():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Get all distinct repos
         cursor.execute("""
             SELECT DISTINCT repo_id FROM (
                 SELECT repo_id FROM deployments
@@ -321,21 +320,18 @@ def get_overall_metrics():
         metrics = []
 
         for repo_id in repos:
-            # Total successful deployments
             cursor.execute("""
                 SELECT COUNT(*) FROM deployments
                 WHERE repo_id = %s AND status='success'
             """, (repo_id,))
             successful_deployments = cursor.fetchone()[0]
 
-            # Total deployments (for failure rate)
             cursor.execute("""
                 SELECT COUNT(*) FROM deployments
                 WHERE repo_id = %s
             """, (repo_id,))
             total_deployments = cursor.fetchone()[0]
 
-            # Change Failure Rate
             cursor.execute("""
                 SELECT COUNT(DISTINCT i.deployment_id)
                 FROM incidents i
@@ -344,7 +340,6 @@ def get_overall_metrics():
             failed_deployments = cursor.fetchone()[0]
             failure_rate = (failed_deployments / total_deployments * 100) if total_deployments else 0.0
 
-            # Median Lead Time (based on DISTINCT lead_time_hours from dora_metrics)
             cursor.execute("""
                 SELECT
                     COALESCE(
@@ -359,7 +354,6 @@ def get_overall_metrics():
             """, (repo_id,))
             median_lead_time = cursor.fetchone()[0]
 
-            # Median MTTR
             cursor.execute("""
                 SELECT EXTRACT(EPOCH FROM (closed_at - created_at)) / 3600.0
                 FROM incidents
@@ -384,7 +378,6 @@ def get_overall_metrics():
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
-
 
 @app.route('/health', methods=['GET'])
 def health_check():
