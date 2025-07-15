@@ -25,16 +25,18 @@ def insert_pull_request(cursor, pr, repo_id):
     merged_at = datetime.strptime(pr['merged_at'], '%Y-%m-%dT%H:%M:%SZ') if pr.get('merged_at') else None
     commit_sha = pr.get('merge_commit_sha', '')
     base_branch = pr['base']['ref']
+    pr_name = pr.get('title', '')
     payload = json.dumps({"pull_request": pr})
     cursor.execute("""
         INSERT INTO pull_requests 
-            (repo_id, pr_id, merged_at, created_at, first_commit_at, base_branch, commit_sha, payload)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            (repo_id, pr_id, merged_at, created_at, first_commit_at, base_branch, commit_sha, pr_name, payload)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (pr_id) DO UPDATE SET
             merged_at = EXCLUDED.merged_at,
             commit_sha = EXCLUDED.commit_sha,
+            pr_name = EXCLUDED.pr_name,
             payload = EXCLUDED.payload
-    """, (repo_id, pr_id, merged_at, created_at, created_at, base_branch, commit_sha, payload))
+    """, (repo_id, pr_id, merged_at, created_at, created_at, base_branch, commit_sha, pr_name, payload))
 
 def insert_deployment(cursor, deployment, status, repo_id):
     deployment_id = deployment['id']
