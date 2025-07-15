@@ -82,19 +82,23 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
 
     median_lead_time = median(lead_times)
 
+    # Change Failure Rate: count of unique deployments that had incidents that day
     cursor.execute("""
-        SELECT COUNT(*)
-        FROM incidents i
-        JOIN deployments d ON i.deployment_id = d.deployment_id
-        WHERE 
-            i.repo_id = %s AND
-            i.is_incident = TRUE AND
-            d.created_at BETWEEN %s AND %s AND
-            d.deployment_id IN %s
-    """, (repo_id, start_time, end_time, prod_deployment_ids))
+    SELECT COUNT(DISTINCT i.deployment_id)
+    FROM incidents i
+    WHERE i.repo_id = %s
+          AND i.is_incident = TRUE
+          AND i.deployment_id IN (
+              SELECT d.deployment_id
+              FROM deployments d
+              WHERE d.repo_id = %s
+                AND d.created_at BETWEEN %s AND %s
+          )
+    """, (repo_id, repo_id, start_time, end_time))
     failed_deployments = cursor.fetchone()[0] or 0
 
     failure_rate = calculate_failure_rate(deployment_count, failed_deployments)
+
 
     mttr_times = []
     cursor.execute("""
