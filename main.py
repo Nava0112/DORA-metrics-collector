@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 FIRST_RUN_FLAG_FILE = ".first_run_complete"
 
 def refresh_grafana_dashboard():
-    """Ping Grafana dashboard (optional)"""
+    """Optional ping to Grafana dashboard to keep it warm"""
     try:
         dashboard_uid = os.getenv('GRAFANA_DASHBOARD_UID', 'dora-metrics')
         grafana_url = os.getenv('GRAFANA_URL')
@@ -53,37 +53,37 @@ def refresh_grafana_dashboard():
         logger.error(f"Error checking Grafana dashboard: {str(e)}")
 
 def metrics_job():
-    """Run scheduled metrics processing"""
+    """Run DORA metrics processing"""
     try:
-        logger.info("📊 Running scheduled DORA metrics processing...")
+        logger.info("📊 Running DORA metrics processing...")
         results = process_metrics()
-        logger.info(f"✅ Processed {len(results)} repositories")
+        logger.info(f"✅ Processed metrics for {len(results)} repositories")
         refresh_grafana_dashboard()
     except Exception as e:
         logger.error(f"❌ Metrics job failed: {str(e)}")
 
 def start_scheduler():
-    """Start background scheduler for metrics job"""
-    schedule.every().day.at("00:05").do(metrics_job)
-    logger.info("📅 Scheduler started. First job scheduled for 00:05 UTC")
+    """Start scheduler to run metrics every hour"""
+    schedule.every(1).hours.do(metrics_job)
+    logger.info("⏰ Scheduler started. Metrics will run every hour.")
 
     def scheduler_loop():
         while True:
             schedule.run_pending()
-            time.sleep(60)
+            time.sleep(60)  # check every minute
 
     thread = threading.Thread(target=scheduler_loop, daemon=True)
     thread.start()
     return thread
 
 def setup_application():
-    """Initialize system on first run and prepare app server"""
+    """Initial setup: DB init, backfill, first metrics run, then scheduler"""
     logger.info("🚀 Starting application setup...")
 
     is_first_run = not os.path.exists(FIRST_RUN_FLAG_FILE)
 
     if is_first_run:
-        logger.info("🆕 First-time setup detected: Initializing DB and running GitHub backfill...")
+        logger.info("🆕 First-time setup detected: initializing DB and running GitHub backfill...")
         initialize_db()
         backfill()
         with open(FIRST_RUN_FLAG_FILE, "w") as f:
@@ -91,9 +91,11 @@ def setup_application():
     else:
         logger.info("✅ DB and data already initialized. Skipping backfill.")
 
+    # Start the scheduler
     scheduler_thread = start_scheduler()
 
-    logger.info("⚡ Running initial metrics processing...")
+    # Immediately run metrics once on start
+    logger.info("⚡ Running initial metrics calculation...")
     metrics_job()
 
     return webhook_app, scheduler_thread
