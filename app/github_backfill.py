@@ -15,7 +15,7 @@ def github_get(url):
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json"
     }
-    return requests.get(url, headers=headers)
+    return requests.get(url, headers=headers, timeout=10)
 
 def insert_pull_request(cursor, pr, repo_id):
     pr_id = pr['id']
