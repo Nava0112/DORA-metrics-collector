@@ -133,8 +133,6 @@ def handle_issues_event(cursor, payload):
     issue_id = issue['id']
     created_at = datetime.strptime(issue['created_at'], '%Y-%m-%dT%H:%M:%SZ')
     closed_at = datetime.strptime(issue['closed_at'], '%Y-%m-%dT%H:%M:%SZ') if issue.get('closed_at') else None
-
-    # 🔥 Always mark as incident
     is_incident = True
 
     try:
