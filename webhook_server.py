@@ -1,9 +1,9 @@
-# webhook_server.py
 import os
 import json
 import logging
 import hmac
 import hashlib
+import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 from db_utils import get_db_connection
@@ -79,8 +79,26 @@ def handle_pull_request_event(cursor, payload):
     commit_sha = pr.get('merge_commit_sha', '')
     created_at = datetime.strptime(pr['created_at'], '%Y-%m-%dT%H:%M:%SZ')
     merged_at = datetime.strptime(pr['merged_at'], '%Y-%m-%dT%H:%M:%SZ')
-    first_commit_at = created_at
     pr_name = pr.get('title', '')
+
+    # 🔥 Fetch actual first commit date
+    try:
+        commits_url = pr['_links']['commits']['href']
+        commits_resp = requests.get(commits_url, headers={
+            "Authorization": f"token {os.getenv('GITHUB_TOKEN')}",
+            "Accept": "application/vnd.github+json"
+        })
+        commits = commits_resp.json()
+        if commits and isinstance(commits, list):
+            first_commit_at = min(
+                datetime.strptime(c['commit']['author']['date'], '%Y-%m-%dT%H:%M:%SZ')
+                for c in commits
+            )
+        else:
+            first_commit_at = created_at
+    except Exception as e:
+        logger.warning(f"Could not fetch commits for PR {pr_id}: {e}")
+        first_commit_at = created_at
 
     try:
         cursor.execute("""
@@ -93,6 +111,7 @@ def handle_pull_request_event(cursor, payload):
                 merged_at = EXCLUDED.merged_at,
                 commit_sha = EXCLUDED.commit_sha,
                 pr_name = EXCLUDED.pr_name,
+                first_commit_at = EXCLUDED.first_commit_at,
                 payload = EXCLUDED.payload
         """, (
             repo_id, pr_id, merged_at, created_at,
@@ -105,7 +124,6 @@ def handle_pull_request_event(cursor, payload):
     except Exception as e:
         logger.error(f"Error storing PR: {str(e)}")
 
-
 def handle_issues_event(cursor, payload):
     if payload['action'] not in ['opened', 'closed', 'reopened', 'labeled', 'unlabeled']:
         return
@@ -115,8 +133,9 @@ def handle_issues_event(cursor, payload):
     issue_id = issue['id']
     created_at = datetime.strptime(issue['created_at'], '%Y-%m-%dT%H:%M:%SZ')
     closed_at = datetime.strptime(issue['closed_at'], '%Y-%m-%dT%H:%M:%SZ') if issue.get('closed_at') else None
-    labels = [label['name'].lower() for label in issue.get('labels', [])]
-    is_incident = any(term in label for label in labels for term in ['incident', 'outage', 'failure', 'sev'])
+
+    # 🔥 Always mark as incident
+    is_incident = True
 
     try:
         cursor.execute("""
@@ -133,6 +152,7 @@ def handle_issues_event(cursor, payload):
             repo_id, issue_id, created_at, closed_at, is_incident, json.dumps(payload)
         ))
 
+        # Link to nearest deployment
         cursor.execute("""
             UPDATE incidents
             SET deployment_id = (
@@ -146,6 +166,7 @@ def handle_issues_event(cursor, payload):
             WHERE issue_id = %s
         """, (repo_id, created_at, created_at, created_at, issue_id))
 
+        logger.info(f"✅ Inserted incident {issue_id} for repo {repo_id}")
     except Exception as e:
         logger.error(f"Error storing incident: {str(e)}")
 
@@ -318,24 +339,27 @@ def get_overall_metrics():
 
             # Change Failure Rate
             cursor.execute("""
-                SELECT COUNT(DISTINCT i.issue_id)
+                SELECT COUNT(DISTINCT i.deployment_id)
                 FROM incidents i
-                JOIN deployments d ON i.deployment_id = d.deployment_id
-                WHERE i.repo_id = %s AND i.is_incident = TRUE
+                WHERE i.repo_id = %s AND i.is_incident = TRUE AND i.deployment_id IS NOT NULL
             """, (repo_id,))
             failed_deployments = cursor.fetchone()[0]
             failure_rate = (failed_deployments / total_deployments * 100) if total_deployments else 0.0
 
-            # Median Lead Time
+            # Median Lead Time (based on DISTINCT lead_time_hours from dora_metrics)
             cursor.execute("""
-                SELECT EXTRACT(EPOCH FROM (d.created_at - pr.first_commit_at)) / 3600.0
-                FROM deployment_prs dp
-                JOIN pull_requests pr ON dp.pr_id = pr.pr_id
-                JOIN deployments d ON dp.deployment_id = d.deployment_id
-                WHERE d.repo_id = %s AND pr.first_commit_at IS NOT NULL
+                SELECT
+                    COALESCE(
+                        percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_time_hours),
+                        0.0
+                    ) AS median_lead_time
+                FROM (
+                    SELECT DISTINCT lead_time_hours
+                    FROM dora_metrics
+                    WHERE repo_id = %s
+                ) AS distinct_lead_times
             """, (repo_id,))
-            lead_times = [row[0] for row in cursor.fetchall()]
-            median_lead_time = median(lead_times)
+            median_lead_time = cursor.fetchone()[0]
 
             # Median MTTR
             cursor.execute("""
@@ -344,7 +368,7 @@ def get_overall_metrics():
                 WHERE repo_id = %s AND is_incident = TRUE AND closed_at IS NOT NULL
             """, (repo_id,))
             mttrs = [row[0] for row in cursor.fetchall()]
-            median_mttr = median(mttrs)
+            median_mttr = median(mttrs) if mttrs else 0.0
 
             metrics.append({
                 "repo_id": repo_id,
@@ -364,7 +388,6 @@ def get_overall_metrics():
         if conn: conn.close()
 
 
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok"}), 200
@@ -374,7 +397,5 @@ def home():
     return "🚀 Dora Metrics Webhook Server is running!", 200
 
 if __name__ == '__main__':
-    from db_utils import initialize_db
     initialize_db()
     app.run(host='0.0.0.0', port=5000, debug=True)
-# webhook_server.py

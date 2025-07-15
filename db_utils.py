@@ -59,6 +59,7 @@ def initialize_db():
             id SERIAL PRIMARY KEY,
             repo_id BIGINT NOT NULL,
             pr_id BIGINT NOT NULL UNIQUE,
+            pr_name TEXT,
             merged_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL,
             first_commit_at TIMESTAMPTZ,
