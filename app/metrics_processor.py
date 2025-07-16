@@ -89,7 +89,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     SELECT COUNT(DISTINCT i.deployment_id)
     FROM incidents i
     WHERE i.repo_id = %s
-          AND i.is_incident = TRUE
           AND i.deployment_id IN (
               SELECT d.deployment_id
               FROM deployments d
@@ -100,29 +99,23 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     failed_deployments = cursor.fetchone()[0] or 0
     failure_rate = calculate_failure_rate(deployment_count, failed_deployments)
 
-    mttr_times = []
-    # After computing deployments, lead/time, CFR...
-    # --- For debugging
+    # Calculate MTTR (by closed_at date)
     cursor.execute("""
-        SELECT created_at, closed_at, EXTRACT(EPOCH FROM (closed_at - created_at))/3600.0
+        SELECT created_at, closed_at
         FROM incidents
         WHERE repo_id = %s
-        AND closed_at IS NOT NULL
-        AND DATE(closed_at) = %s
+          AND closed_at IS NOT NULL
+          AND DATE(closed_at) = %s
     """, (repo_id, metric_date))
     rows = cursor.fetchall()
 
-    print(f"📅 {metric_date} raw incident rows: {rows}")
+    mttr_times = [calculate_mttr(created_at, closed_at) for created_at, closed_at in rows]
+    mean_mttr = sum(mttr_times)/len(mttr_times) if mttr_times else 0.0
 
-    mttr_times = [calculate_mttr(created_at, closed_at) for created_at, closed_at, _ in rows]
-    mean_mttr = round(sum(mttr_times)/len(mttr_times), 2) if mttr_times else 0.0
-
-
-# Then INSERT/UPDATE dora_metrics with mean_mttr
-    for created_at, closed_at in cursor.fetchall():
-        mttr_times.append(calculate_mttr(created_at, closed_at))
-
-    mean_mttr = round(sum(mttr_times)/len(mttr_times), 0) if mttr_times else 0.0
+    # ✅ Round everything to 3 decimals before inserting
+    mean_lead_time = round(mean_lead_time, 3)
+    failure_rate = round(failure_rate, 3)
+    mean_mttr = round(mean_mttr, 3)
 
     # Insert or update the metrics table
     cursor.execute("""
