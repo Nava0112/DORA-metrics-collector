@@ -11,6 +11,8 @@ from dora_calculations import detect_production_deployment, median
 from db_utils import initialize_db
 from metrics_processor import process_metrics
 from github_auth import get_installation_token  
+from datetime import timedelta
+
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -298,86 +300,47 @@ def get_daily_metrics():
         cursor.close()
         conn.close()
 
-@app.route('/metrics', methods=['GET'])
-def get_overall_metrics():
-    conn = None
-    cursor = None
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    signature = request.headers.get('X-Hub-Signature-256')
+    if not signature or not verify_signature(request.data, signature):
+        return jsonify({'error': 'Invalid signature'}), 401
+
+    event_type = request.headers.get('X-GitHub-Event')
+    payload = request.json
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        cursor.execute("""
-            SELECT DISTINCT repo_id FROM (
-                SELECT repo_id FROM deployments
-                UNION
-                SELECT repo_id FROM pull_requests
-                UNION
-                SELECT repo_id FROM incidents
-            ) AS repos
-        """)
-        repos = [row[0] for row in cursor.fetchall()]
+        if event_type == 'deployment_status':
+            handle_deployment_event(cursor, payload)
+        elif event_type == 'pull_request':
+            handle_pull_request_event(cursor, payload)
+        elif event_type == 'issues':
+            handle_issues_event(cursor, payload)
 
-        metrics = []
+        # ✅ Extract repo_id and set the metric date to today's date
+        repo_id = payload['repository']['id']
+        metric_date = datetime.utcnow().date()
+        start_time = datetime.combine(metric_date, datetime.min.time())
+        end_time = start_time + timedelta(days=1)
 
-        for repo_id in repos:
-            cursor.execute("""
-                SELECT COUNT(*) FROM deployments
-                WHERE repo_id = %s AND status='success'
-            """, (repo_id,))
-            successful_deployments = cursor.fetchone()[0]
+        from dora_calculations import process_repo_metrics  # import here to avoid circular dependency
 
-            cursor.execute("""
-                SELECT COUNT(*) FROM deployments
-                WHERE repo_id = %s
-            """, (repo_id,))
-            total_deployments = cursor.fetchone()[0]
+        # ✅ Recalculate metrics only for today
+        process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date)
 
-            cursor.execute("""
-                SELECT COUNT(DISTINCT i.deployment_id)
-                FROM incidents i
-                WHERE i.repo_id = %s AND i.is_incident = TRUE AND i.deployment_id IS NOT NULL
-            """, (repo_id,))
-            failed_deployments = cursor.fetchone()[0]
-            failure_rate = (failed_deployments / total_deployments * 100) if total_deployments else 0.0
-
-            cursor.execute("""
-                SELECT
-                    COALESCE(
-                        percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_time_hours),
-                        0.0
-                    ) AS median_lead_time
-                FROM (
-                    SELECT DISTINCT lead_time_hours
-                    FROM dora_metrics
-                    WHERE repo_id = %s
-                ) AS distinct_lead_times
-            """, (repo_id,))
-            median_lead_time = cursor.fetchone()[0]
-
-            cursor.execute("""
-                SELECT EXTRACT(EPOCH FROM (closed_at - created_at)) / 3600.0
-                FROM incidents
-                WHERE repo_id = %s AND is_incident = TRUE AND closed_at IS NOT NULL
-            """, (repo_id,))
-            mttrs = [row[0] for row in cursor.fetchall()]
-            median_mttr = median(mttrs) if mttrs else 0.0
-
-            metrics.append({
-                "repo_id": repo_id,
-                "total_successful_deployments": successful_deployments,
-                "median_lead_time_hours": median_lead_time,
-                "change_failure_rate": failure_rate,
-                "median_mttr_hours": median_mttr
-            })
-
-        return jsonify({"overall_metrics": metrics}), 200
+        conn.commit()
+        return jsonify({'status': 'success'}), 200
 
     except Exception as e:
-        logger.error(f"Error computing overall metrics: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Webhook processing failed: {str(e)}")
+        return jsonify({'error': str(e)}), 500
     finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
+        cursor.close()
+        conn.close()
+
 
 @app.route('/health', methods=['GET'])
 def health_check():
