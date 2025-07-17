@@ -5,25 +5,24 @@ import hmac
 import hashlib
 import requests
 from flask import Flask, request, jsonify
-from datetime import datetime
-from db_utils import get_db_connection
+from datetime import datetime, timedelta
+from db_utils import get_db_connection, initialize_db
 from dora_calculations import detect_production_deployment, median
-from db_utils import initialize_db
 from metrics_processor import process_metrics, process_repo_metrics
 from github_auth import get_installation_token  
-from datetime import timedelta
-
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# Verify GitHub webhook signature
 def verify_signature(payload_body, signature_header):
     secret = os.getenv('GITHUB_WEBHOOK_SECRET').encode()
     hash_object = hmac.new(secret, msg=payload_body, digestmod=hashlib.sha256)
     expected_signature = 'sha256=' + hash_object.hexdigest()
     return hmac.compare_digest(expected_signature, signature_header)
 
+# Link PR to deployment by commit SHA
 def link_pr_to_deployment(cursor, repo_id, pr_id, commit_sha):
     try:
         cursor.execute("""
@@ -36,6 +35,7 @@ def link_pr_to_deployment(cursor, repo_id, pr_id, commit_sha):
     except Exception as e:
         logger.error(f"Error linking PR to deployment: {str(e)}")
 
+# Handle deployment webhook
 def handle_deployment_event(cursor, payload):
     deployment = payload['deployment']
     status = payload['deployment_status']['state']
@@ -67,10 +67,11 @@ def handle_deployment_event(cursor, payload):
                 commit_sha,
                 json.dumps(payload)
             ))
-            logger.info(f"✅ Stored deployment {deployment['id']}")
+            logger.info(f"Stored deployment {deployment['id']}")
         except Exception as e:
-            logger.error(f"❌ Error storing deployment: {str(e)}")
+            logger.error(f"Error storing deployment: {str(e)}")
 
+# Handle merged PR webhook
 def handle_pull_request_event(cursor, payload):
     if payload['action'] != 'closed' or not payload['pull_request']['merged']:
         return
@@ -83,7 +84,7 @@ def handle_pull_request_event(cursor, payload):
     merged_at = datetime.strptime(pr['merged_at'], '%Y-%m-%dT%H:%M:%SZ')
     pr_name = pr.get('title', '')
 
-    # 🔥 Fetch actual first commit date using GitHub App token
+    # Try to get first commit time from GitHub API
     try:
         commits_url = pr['_links']['commits']['href']
         token = get_installation_token()
@@ -127,6 +128,7 @@ def handle_pull_request_event(cursor, payload):
     except Exception as e:
         logger.error(f"Error storing PR: {str(e)}")
 
+# Handle GitHub issues event (treated as incidents)
 def handle_issues_event(cursor, payload):
     if payload['action'] not in ['opened', 'closed', 'reopened', 'labeled', 'unlabeled']:
         return
@@ -153,7 +155,7 @@ def handle_issues_event(cursor, payload):
             repo_id, issue_id, created_at, closed_at, is_incident, json.dumps(payload)
         ))
 
-        # Link to nearest deployment
+        # Link issue to nearest deployment
         cursor.execute("""
             UPDATE incidents
             SET deployment_id = (
@@ -167,17 +169,17 @@ def handle_issues_event(cursor, payload):
             WHERE issue_id = %s
         """, (repo_id, created_at, created_at, created_at, issue_id))
 
-        logger.info(f"✅ Inserted incident {issue_id} for repo {repo_id}")
+        logger.info(f"Inserted incident {issue_id} for repo {repo_id}")
     except Exception as e:
         logger.error(f"Error storing incident: {str(e)}")
 
+# Endpoint to get DORA metrics summary
 @app.route('/metrics', methods=['GET'])
 def get_overall_metrics():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Get all unique repo_ids that have DORA-related data
         cursor.execute("""
             SELECT DISTINCT repo_id FROM (
                 SELECT repo_id FROM deployments
@@ -191,21 +193,18 @@ def get_overall_metrics():
         metrics = []
 
         for repo_id in repos:
-            # Total successful deployments
             cursor.execute("""
                 SELECT COUNT(*) FROM deployments
                 WHERE repo_id = %s AND status='success'
             """, (repo_id,))
             successful_deployments = cursor.fetchone()[0]
 
-            # Total deployments
             cursor.execute("""
                 SELECT COUNT(*) FROM deployments
                 WHERE repo_id = %s
             """, (repo_id,))
             total_deployments = cursor.fetchone()[0]
 
-            # Failure rate
             cursor.execute("""
                 SELECT COUNT(DISTINCT i.deployment_id)
                 FROM incidents i
@@ -214,13 +213,11 @@ def get_overall_metrics():
             failed_deployments = cursor.fetchone()[0]
             failure_rate = (failed_deployments / total_deployments * 100) if total_deployments else 0.0
 
-            # Median lead time
             cursor.execute("""
-                SELECT
-                    COALESCE(
-                        percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_time_hours),
-                        0.0
-                    ) AS median_lead_time
+                SELECT COALESCE(
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY lead_time_hours),
+                    0.0
+                )
                 FROM (
                     SELECT DISTINCT lead_time_hours
                     FROM dora_metrics
@@ -229,7 +226,6 @@ def get_overall_metrics():
             """, (repo_id,))
             median_lead_time = cursor.fetchone()[0]
 
-            # Median MTTR
             cursor.execute("""
                 SELECT EXTRACT(EPOCH FROM (closed_at - created_at)) / 3600.0
                 FROM incidents
@@ -256,6 +252,7 @@ def get_overall_metrics():
         if cursor: cursor.close()
         if conn: conn.close()
 
+# Manually trigger DORA metric calculation
 @app.route('/calculate', methods=['POST'])
 def calculate_now():
     try:
@@ -264,6 +261,7 @@ def calculate_now():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# Show latest deployment, PR, and incident entries
 @app.route('/logs', methods=['GET'])
 def get_logs():
     try:
@@ -295,28 +293,22 @@ def get_logs():
         incidents = cursor.fetchall()
 
         return jsonify({
-            "deployments": [
-                {
-                    "deployment_id": d[0], "repo_id": d[1], "environment": d[2],
-                    "status": d[3], "created_at": d[4].isoformat()
-                } for d in deployments
-            ],
-            "pull_requests": [
-                {
-                    "pr_id": p[0], "repo_id": p[1],
-                    "merged_at": p[2].isoformat() if p[2] else None,
-                    "base_branch": p[3],
-                    "pr_name": p[4]
-                } for p in prs
-            ],
-            "incidents": [
-                {
-                    "issue_id": i[0], "repo_id": i[1],
-                    "created_at": i[2].isoformat(),
-                    "closed_at": i[3].isoformat() if i[3] else None,
-                    "is_incident": i[4]
-                } for i in incidents
-            ]
+            "deployments": [{
+                "deployment_id": d[0], "repo_id": d[1], "environment": d[2],
+                "status": d[3], "created_at": d[4].isoformat()
+            } for d in deployments],
+            "pull_requests": [{
+                "pr_id": p[0], "repo_id": p[1],
+                "merged_at": p[2].isoformat() if p[2] else None,
+                "base_branch": p[3],
+                "pr_name": p[4]
+            } for p in prs],
+            "incidents": [{
+                "issue_id": i[0], "repo_id": i[1],
+                "created_at": i[2].isoformat(),
+                "closed_at": i[3].isoformat() if i[3] else None,
+                "is_incident": i[4]
+            } for i in incidents]
         }), 200
 
     except Exception as e:
@@ -325,6 +317,7 @@ def get_logs():
         cursor.close()
         conn.close()
 
+# Get 30 recent daily DORA metrics
 @app.route('/daily_metrics', methods=['GET'])
 def get_daily_metrics():
     try:
@@ -340,21 +333,20 @@ def get_daily_metrics():
             ORDER BY metric_date DESC
             LIMIT 30
         """)
-        results = []
-        for row in cursor.fetchall():
-            results.append({
-                "repo_id": row[0],
-                "date": row[1].isoformat(),
-                "deployment_frequency": row[2],
-                "lead_time_hours": row[3],
-                "change_failure_rate": row[4],
-                "mttr_hours": row[5]
-            })
+        results = [{
+            "repo_id": row[0],
+            "date": row[1].isoformat(),
+            "deployment_frequency": row[2],
+            "lead_time_hours": row[3],
+            "change_failure_rate": row[4],
+            "mttr_hours": row[5]
+        } for row in cursor.fetchall()]
         return jsonify({"daily_metrics": results}), 200
     finally:
         cursor.close()
         conn.close()
 
+# GitHub webhook handler
 @app.route('/webhook', methods=['POST'])
 def webhook():
     signature = request.headers.get('X-Hub-Signature-256')
@@ -375,18 +367,14 @@ def webhook():
         elif event_type == 'issues':
             handle_issues_event(cursor, payload)
 
-        # ✅ Extract repo_id and set the metric date to today's date
         repo_id = payload['repository']['id']
         metric_date = datetime.utcnow().date()
         start_time = datetime.combine(metric_date, datetime.min.time())
         end_time = start_time + timedelta(days=1)
 
-        # ✅ Recalculate metrics only for today
         process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date)
 
-        cursor.execute("""
-            UPDATE sync_state SET last_webhook_at = NOW() WHERE id = 1
-        """)
+        cursor.execute("UPDATE sync_state SET last_webhook_at = NOW() WHERE id = 1")
         conn.commit()
         return jsonify({'status': 'success'}), 200
 
@@ -397,14 +385,13 @@ def webhook():
         cursor.close()
         conn.close()
 
-
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "ok"}), 200
 
 @app.route('/', methods=['GET'])
 def home():
-    return "🚀 Dora Metrics Webhook Server is running!", 200
+    return "Dora Metrics Webhook Server is running!", 200
 
 if __name__ == '__main__':
     initialize_db()
