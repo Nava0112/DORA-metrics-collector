@@ -2,7 +2,8 @@ import os
 import requests
 from flask import Flask
 from webhook_server import app as webhook_app
-from db_utils import initialize_db
+from db_utils import initialize_db , get_db_connection
+from github_auth import get_installation_token
 from metrics_processor import process_metrics
 from github_backfill import backfill
 
@@ -32,12 +33,23 @@ def refresh_grafana_dashboard():
 
 def metrics_job():
     try:
-        print("Running DORA metrics processing...")
-        results = process_metrics()
-        print(f"Processed metrics for {len(results)} dates.")
+        print(" Running DORA metrics processing...")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT last_webhook_at FROM sync_state WHERE id = 1")
+        row = cursor.fetchone()
+        last_webhook_at = row[0].date() if row and row[0] else None
+        cursor.close()
+        conn.close()
+
+        results = process_metrics(start_date=last_webhook_at)
+
+        print(f" Processed metrics for {len(results)} dates.")
         refresh_grafana_dashboard()
     except Exception as e:
-        print(f"Metrics job failed: {e}")
+        print(f" Metrics job failed: {str(e)}")
+
 
 def setup_application():
     print("Starting application setup...")

@@ -139,7 +139,7 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
         'mttr': mean_mttr
     }
 
-def process_metrics():
+def process_metrics(start_date=None):
     logger.info("Starting historical daily metrics processing...")
     try:
         conn = get_db_connection()
@@ -155,7 +155,13 @@ def process_metrics():
             ) AS dates
         """)
         first_date_row = cursor.fetchone()
-        first_date = first_date_row[0].date() if first_date_row and first_date_row[0] else datetime.utcnow().date()
+        default_start = first_date_row[0].date() if first_date_row and first_date_row[0] else datetime.utcnow().date()
+
+        if not start_date:
+            start_date = default_start
+        else:
+            start_date = max(start_date, default_start)
+
         today = datetime.utcnow().date()
 
         cursor.execute("""
@@ -168,7 +174,7 @@ def process_metrics():
         repos = [row[0] for row in cursor.fetchall()]
 
         results = {}
-        for single_date in daterange(first_date, today):
+        for single_date in daterange(start_date, today):  # ✅ corrected this line
             start_time = datetime.combine(single_date, datetime.min.time())
             end_time = start_time + timedelta(days=1)
             metric_date = single_date
