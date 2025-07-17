@@ -24,28 +24,28 @@ def refresh_grafana_dashboard():
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            print(f"✅ Grafana dashboard '{dashboard_uid}' is reachable.")
+            print(f"Grafana dashboard '{dashboard_uid}' is reachable.")
         else:
-            print(f"❌ Grafana dashboard check failed: {response.status_code} - {response.text}")
+            print(f"Grafana dashboard check failed: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"❌ Error checking Grafana dashboard: {str(e)}")
+        print(f"Error checking Grafana dashboard: {e}")
 
 def metrics_job():
     try:
-        print("📊 Running DORA metrics processing...")
+        print("Running DORA metrics processing...")
         results = process_metrics()
-        print(f"✅ Processed metrics for {len(results)} dates.")
+        print(f"Processed metrics for {len(results)} dates.")
         refresh_grafana_dashboard()
     except Exception as e:
-        print(f"❌ Metrics job failed: {str(e)}")
+        print(f"Metrics job failed: {e}")
 
 def setup_application():
-    print("🚀 Starting application setup...")
-    print("🔄 Running DB initialization and GitHub backfill...")
+    print("Starting application setup...")
+    print("Running DB initialization and GitHub backfill...")
     initialize_db()
     backfill()
 
-    print("⚡ Running initial metrics calculation...")
+    print("Running initial metrics calculation...")
     metrics_job()
 
     return webhook_app
@@ -53,9 +53,9 @@ def setup_application():
 if __name__ == '__main__':
     app = setup_application()
     try:
-        print("🧩 Starting DORA Metrics Webhook Server on port 5000...")
+        print("Starting DORA Metrics Webhook Server on port 5000...")
         app.run(host='0.0.0.0', port=5000, use_reloader=False)
     except KeyboardInterrupt:
-        print("🛑 Shutdown requested by user (CTRL+C)")
+        print("Shutdown requested by user (CTRL+C)")
     except Exception as e:
-        print(f"🔥 Fatal error: {str(e)}")
+        print(f"Fatal error: {e}")

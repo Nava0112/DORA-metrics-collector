@@ -23,7 +23,7 @@ def is_production_deployment(environment, payload):
             workflow_name = payload_data.get('workflow_run', {}).get('name', '').lower()
             return any(k in workflow_name for k in PRODUCTION_KEYWORDS)
     except Exception as e:
-        logger.warning(f"Error checking production filter: {str(e)}")
+        logger.warning(f"Error checking production filter: {e}")
     return False
 
 def daterange(start_date, end_date):
@@ -31,7 +31,6 @@ def daterange(start_date, end_date):
         yield start_date + timedelta(days=n)
 
 def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
-    # Get all successful deployments for the repo on this day
     cursor.execute("""
         SELECT 
             d.deployment_id, d.commit_sha, d.created_at,
@@ -44,7 +43,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     """, (repo_id, start_time, end_time))
     all_deployments = cursor.fetchall()
 
-    # Filter only production deployments
     prod_deployments = [
         (dep_id, commit_sha, created_at)
         for dep_id, commit_sha, created_at, environment, payload in all_deployments
@@ -53,7 +51,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
 
     deployment_count = len(prod_deployments)
 
-    # Calculate mean lead time (CLT)
     lead_times = []
     for dep_id, commit_sha, deploy_time in prod_deployments:
         cursor.execute("""
@@ -66,7 +63,6 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
             lead_time = calculate_lead_time(first_commit, None, deploy_time)
             lead_times.append(lead_time)
 
-    # Handle deployments with no PRs
     prod_deployment_ids = tuple([d[0] for d in prod_deployments]) or (0,)
     cursor.execute(f"""
         SELECT d.created_at
@@ -82,24 +78,22 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     for (deploy_time,) in cursor.fetchall():
         lead_times.append(calculate_lead_time(deploy_time, None, deploy_time))
 
-    mean_lead_time = sum(lead_times)/len(lead_times) if lead_times else 0.0
+    mean_lead_time = sum(lead_times) / len(lead_times) if lead_times else 0.0
 
-    # Calculate CFR (change failure rate)
     cursor.execute("""
-    SELECT COUNT(DISTINCT i.deployment_id)
-    FROM incidents i
-    WHERE i.repo_id = %s
-          AND i.deployment_id IN (
-              SELECT d.deployment_id
-              FROM deployments d
-              WHERE d.repo_id = %s
-                AND d.created_at BETWEEN %s AND %s
-          ) 
+        SELECT COUNT(DISTINCT i.deployment_id)
+        FROM incidents i
+        WHERE i.repo_id = %s
+              AND i.deployment_id IN (
+                  SELECT d.deployment_id
+                  FROM deployments d
+                  WHERE d.repo_id = %s
+                    AND d.created_at BETWEEN %s AND %s
+              ) 
     """, (repo_id, repo_id, start_time, end_time))
     failed_deployments = cursor.fetchone()[0] or 0
     failure_rate = calculate_failure_rate(deployment_count, failed_deployments)
 
-    # Calculate MTTR (by closed_at date)
     cursor.execute("""
         SELECT created_at, closed_at
         FROM incidents
@@ -110,14 +104,12 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     rows = cursor.fetchall()
 
     mttr_times = [calculate_mttr(created_at, closed_at) for created_at, closed_at in rows]
-    mean_mttr = sum(mttr_times)/len(mttr_times) if mttr_times else 0.0
+    mean_mttr = sum(mttr_times) / len(mttr_times) if mttr_times else 0.0
 
-    # ✅ Round everything to 3 decimals before inserting
     mean_lead_time = round(mean_lead_time, 3)
     failure_rate = round(failure_rate, 3)
     mean_mttr = round(mean_mttr, 3)
 
-    # Insert or update the metrics table
     cursor.execute("""
         INSERT INTO dora_metrics (
             repo_id, metric_date, 
@@ -188,11 +180,11 @@ def process_metrics():
                 )
 
         conn.commit()
-        logger.info("✅ Historical metrics processing completed successfully")
+        logger.info("Historical metrics processing completed successfully")
         return results
 
     except Exception as e:
-        logger.error(f"Error processing historical metrics: {str(e)}")
+        logger.error(f"Error processing historical metrics: {e}")
         return {}
     finally:
         if cursor: cursor.close()

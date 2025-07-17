@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 import logging
 import psycopg2.errors
 
-
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,6 @@ def get_db_connection():
     )
 
 def drop_existing_tables(cursor):
-    """Drop existing tables if they exist"""
     tables = [
         'deployment_prs',
         'incidents',
@@ -36,7 +34,6 @@ def drop_existing_tables(cursor):
             raise
 
 def initialize_db():
-
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -54,7 +51,7 @@ def initialize_db():
             return
 
         if existing_tables - expected_tables:
-            print("❗ Unexpected tables found in DB:", existing_tables - expected_tables)
+            print("Unexpected tables found in DB:", existing_tables - expected_tables)
             choice = input("Drop ALL and recreate expected schema? (y/n): ")
             if choice.lower() == 'y':
                 drop_existing_tables(cursor)
@@ -64,7 +61,7 @@ def initialize_db():
                 print("Aborting initialization.")
                 exit(1)
         else:
-            logger.info("✅ Tables already exist. No changes made.")
+            logger.info("Tables already exist. No changes made.")
 
     except Exception as e:
         logger.error(f"Initialization failed: {e}")
@@ -75,7 +72,7 @@ def initialize_db():
         conn.close()
 
 def _create_tables(cursor):
-    # Create deployments table
+    # deployments table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deployments (
             id SERIAL PRIMARY KEY,
@@ -89,7 +86,7 @@ def _create_tables(cursor):
         );
     """)
 
-    # Create pull_requests table
+    # pull_requests table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS pull_requests (
             id SERIAL PRIMARY KEY,
@@ -105,7 +102,7 @@ def _create_tables(cursor):
         );
     """)
 
-    # Create incidents table
+    # incidents table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS incidents (
             id SERIAL PRIMARY KEY,
@@ -119,7 +116,7 @@ def _create_tables(cursor):
         );
     """)
 
-    # Create deployment_prs link table
+    # deployment_prs link table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS deployment_prs (
             deployment_id BIGINT NOT NULL REFERENCES deployments(deployment_id),
@@ -128,7 +125,7 @@ def _create_tables(cursor):
         );
     """)
 
-    # Create dora_metrics table
+    # dora_metrics table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS dora_metrics (
             id SERIAL PRIMARY KEY,
@@ -143,7 +140,7 @@ def _create_tables(cursor):
         );
     """)
 
-    # Create sync_state table
+    # sync_state table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_state (
             id SERIAL PRIMARY KEY,
@@ -151,37 +148,18 @@ def _create_tables(cursor):
         );
     """)
 
-    # Insert initial sync state if not present
+    # insert default sync state
     cursor.execute("""
         INSERT INTO sync_state (id) VALUES (1)
         ON CONFLICT DO NOTHING;
     """)
 
-    # Create indexes
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_deployments_repo ON deployments(repo_id);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_prs_repo ON pull_requests(repo_id);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_incidents_repo ON incidents(repo_id);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_metrics_repo_date ON dora_metrics(repo_id, metric_date);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_deployment_prs ON deployment_prs(deployment_id, pr_id);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_deployments_sha ON deployments(commit_sha);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_prs_sha ON pull_requests(commit_sha);
-    """)
-    cursor.execute("""
-        CREATE INDEX IF NOT EXISTS idx_metrics_updated ON dora_metrics(last_updated);
-    """)
-
-
-
+    # indexes for performance
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_deployments_repo ON deployments(repo_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_prs_repo ON pull_requests(repo_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_incidents_repo ON incidents(repo_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_repo_date ON dora_metrics(repo_id, metric_date);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_deployment_prs ON deployment_prs(deployment_id, pr_id);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_deployments_sha ON deployments(commit_sha);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_prs_sha ON pull_requests(commit_sha);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_updated ON dora_metrics(last_updated);")

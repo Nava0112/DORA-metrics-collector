@@ -3,14 +3,12 @@ import json
 import requests
 from datetime import datetime
 from db_utils import get_db_connection
-from github_auth import get_installation_token  # Import the GitHub App auth function
+from github_auth import get_installation_token 
 from datetime import timezone
 
-# Remove GITHUB_TOKEN since we're using GitHub App auth now
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 
 def github_get(url):
-    # Get a fresh installation token for each request (tokens last 1 hour)
     token = get_installation_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -26,7 +24,6 @@ def insert_pull_request(cursor, pr, repo_id):
     base_branch = pr['base']['ref']
     pr_name = pr.get('title', '')
 
-    # --- 🔥 Fetch earliest commit in this PR
     commits_url = pr['_links']['commits']['href']
     commits_resp = github_get(commits_url)
     commits = commits_resp.json()
@@ -93,23 +90,20 @@ def backfill():
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Get last webhook timestamp from sync_state
         cursor.execute("SELECT last_webhook_at FROM sync_state WHERE id = 1")
         row = cursor.fetchone()
         last_webhook_at = row[0] if row and row[0] else None
-        print(f"🕒 Last webhook received at: {last_webhook_at}")
+        print(f" Last webhook received at: {last_webhook_at}")
 
-        # 1. Fetch repository details
-        print(f"⏳ Fetching repository details for {GITHUB_REPO}...")
+        print(f" Fetching repository details for {GITHUB_REPO}...")
         repo_data = github_get(f"https://api.github.com/repos/{GITHUB_REPO}").json()
         if 'id' not in repo_data:
             raise ValueError(f"Could not fetch repo data: {repo_data.get('message', 'Unknown error')}")
 
         repo_id = repo_data['id']
-        print(f"✅ Repository ID: {repo_id}")
+        print(f" Repository ID: {repo_id}")
 
-        # 2. Fetch and process Pull Requests
-        print("\n⏳ Fetching Pull Requests...")
+        print("\n Fetching Pull Requests...")
         pr_count = 0
         url = f"https://api.github.com/repos/{GITHUB_REPO}/pulls?state=closed&sort=updated&direction=asc&per_page=100"
         while url:
@@ -120,18 +114,17 @@ def backfill():
             for pr in prs:
                 updated_at = datetime.strptime(pr['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
                 if last_webhook_at and updated_at <= last_webhook_at:
-                    continue  # Skip old PRs
+                    continue  
 
-                if pr.get('merged_at'):  # Only process merged PRs
+                if pr.get('merged_at'):  
                     insert_pull_request(cursor, pr, repo_id)
                     pr_count += 1
 
-            print(f"📦 Processed {pr_count} PRs so far...", end='\r')
+            print(f" Processed {pr_count} PRs so far...", end='\r')
             url = response.links.get('next', {}).get('url')
-        print(f"\n✅ Processed {pr_count} total PRs")
+        print(f"\n Processed {pr_count} total PRs")
 
-        # 3. Fetch and process Deployments
-        print("\n⏳ Fetching Deployments...")
+        print("\n Fetching Deployments...")
         deployment_count = 0
         url = f"https://api.github.com/repos/{GITHUB_REPO}/deployments?per_page=100"
         while url:
@@ -140,7 +133,6 @@ def backfill():
             deployments = response.json()
 
             for deployment in deployments:
-                # Get the successful status for each deployment
                 statuses = github_get(deployment['statuses_url']).json()
                 success_status = next((s for s in statuses if s['state'] == 'success'), None)
 
@@ -152,12 +144,11 @@ def backfill():
                     insert_deployment(cursor, deployment, success_status, repo_id)
                     deployment_count += 1
 
-            print(f"🚀 Processed {deployment_count} deployments so far...", end='\r')
+            print(f" Processed {deployment_count} deployments so far...", end='\r')
             url = response.links.get('next', {}).get('url')
-        print(f"\n✅ Processed {deployment_count} total deployments")
+        print(f"\n Processed {deployment_count} total deployments")
 
-        # 4. Fetch and process Issues (for incidents)
-        print("\n⏳ Fetching Issues...")
+        print("\n Fetching Issues...")
         issue_count = 0
         incident_count = 0
         url = f"https://api.github.com/repos/{GITHUB_REPO}/issues?state=all&sort=updated&direction=asc&per_page=100"
@@ -168,11 +159,11 @@ def backfill():
 
             for issue in issues:
                 if 'pull_request' in issue:
-                    continue  # Skip PRs
+                    continue  
 
                 updated_at = datetime.strptime(pr['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
                 if last_webhook_at and updated_at <= last_webhook_at:
-                    continue  # Skip old issues
+                    continue  
 
                 insert_incident(cursor, issue, repo_id)
                 issue_count += 1
@@ -180,12 +171,11 @@ def backfill():
                 if any(label['name'].lower() in ['incident', 'bug'] for label in issue.get('labels', [])):
                     incident_count += 1
 
-            print(f"⚠️  Processed {issue_count} issues ({incident_count} incidents) so far...", end='\r')
+            print(f"  Processed {issue_count} issues ({incident_count} incidents) so far...", end='\r')
             url = response.links.get('next', {}).get('url')
-        print(f"\n✅ Processed {issue_count} total issues ({incident_count} incidents)")
+        print(f"\n Processed {issue_count} total issues ({incident_count} incidents)")
 
-        # 5. Link PRs to deployments via commit SHA
-        print("\n⏳ Linking PRs to deployments...")
+        print("\n Linking PRs to deployments...")
         cursor.execute("""
             INSERT INTO deployment_prs (deployment_id, pr_id)
             SELECT d.deployment_id, pr.pr_id
@@ -194,10 +184,9 @@ def backfill():
             WHERE d.repo_id = %s AND pr.repo_id = %s
             ON CONFLICT DO NOTHING
         """, (repo_id, repo_id))
-        print(f"✅ Linked {cursor.rowcount} PRs to deployments")
+        print(f" Linked {cursor.rowcount} PRs to deployments")
 
-        # 6. Link incidents to the most recent deployment before the incident
-        print("\n⏳ Linking incidents to deployments...")
+        print("\n Linking incidents to deployments...")
         cursor.execute("""
             UPDATE incidents i
             SET deployment_id = (
@@ -210,13 +199,13 @@ def backfill():
             )
             WHERE i.repo_id = %s AND i.deployment_id IS NULL
         """, (repo_id,))
-        print(f"✅ Linked {cursor.rowcount} incidents to deployments")
+        print(f" Linked {cursor.rowcount} incidents to deployments")
 
         conn.commit()
-        print("\n🎉 Backfill completed successfully!")
+        print("\n Backfill completed successfully!")
 
     except Exception as e:
-        print(f"\n❌ Error during backfill: {str(e)}")
+        print(f"\n Error during backfill: {str(e)}")
         if conn:
             conn.rollback()
         raise
@@ -224,7 +213,7 @@ def backfill():
         if conn:
             cursor.close()
             conn.close()
-    print("✅ Backfill completed!")
+    print(" Backfill completed!")
 
 if __name__ == "__main__":
     backfill()
