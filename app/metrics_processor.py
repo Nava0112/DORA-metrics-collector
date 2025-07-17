@@ -3,6 +3,8 @@ import logging
 import json
 from datetime import datetime, timedelta
 from db_utils import get_db_connection
+from github_auth import get_installation_token
+from dora_calculations import detect_production_deployment
 from dora_calculations import (
     calculate_lead_time,
     calculate_failure_rate,
@@ -12,19 +14,6 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
-PRODUCTION_KEYWORDS = ['production', 'prod', 'release', 'deploy', 'main', 'live']
-
-def is_production_deployment(environment, payload):
-    try:
-        if environment and any(k in environment.lower() for k in PRODUCTION_KEYWORDS):
-            return True
-        if payload:
-            payload_data = payload if isinstance(payload, dict) else json.loads(payload)
-            workflow_name = payload_data.get('workflow_run', {}).get('name', '').lower()
-            return any(k in workflow_name for k in PRODUCTION_KEYWORDS)
-    except Exception as e:
-        logger.warning(f"Error checking production filter: {e}")
-    return False
 
 def daterange(start_date, end_date):
     for n in range((end_date - start_date).days + 1):
@@ -46,7 +35,7 @@ def process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date):
     prod_deployments = [
         (dep_id, commit_sha, created_at)
         for dep_id, commit_sha, created_at, environment, payload in all_deployments
-        if is_production_deployment(environment, payload)
+        if detect_production_deployment(environment, payload)
     ]
 
     deployment_count = len(prod_deployments)
