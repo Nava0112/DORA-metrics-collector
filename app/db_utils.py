@@ -44,7 +44,7 @@ def initialize_db():
         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'")
         existing_tables = {row[0] for row in cursor.fetchall()}
         expected_tables = {
-            'deployments', 'pull_requests', 'incidents', 'deployment_prs', 'dora_metrics'
+            'deployments', 'pull_requests', 'incidents', 'deployment_prs', 'dora_metrics', 'sync_state'
         }
 
         if not expected_tables.issubset(existing_tables):
@@ -75,66 +75,113 @@ def initialize_db():
         conn.close()
 
 def _create_tables(cursor):
-    cursor.execute("""CREATE TABLE IF NOT EXISTS deployments (
-        id SERIAL PRIMARY KEY,
-        repo_id BIGINT NOT NULL,
-        deployment_id BIGINT NOT NULL UNIQUE,
-        environment TEXT,
-        status TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        commit_sha TEXT,
-        payload JSONB
-    );
+    # Create deployments table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deployments (
+            id SERIAL PRIMARY KEY,
+            repo_id BIGINT NOT NULL,
+            deployment_id BIGINT NOT NULL UNIQUE,
+            environment TEXT,
+            status TEXT,
+            created_at TIMESTAMPTZ NOT NULL,
+            commit_sha TEXT,
+            payload JSONB
+        );
+    """)
 
-    CREATE TABLE IF NOT EXISTS pull_requests (
-        id SERIAL PRIMARY KEY,
-        repo_id BIGINT NOT NULL,
-        pr_id BIGINT NOT NULL UNIQUE,
-        pr_name TEXT,
-        merged_at TIMESTAMPTZ,
-        created_at TIMESTAMPTZ NOT NULL,
-        first_commit_at TIMESTAMPTZ,
-        base_branch TEXT,
-        commit_sha TEXT,
-        payload JSONB
-    );
+    # Create pull_requests table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS pull_requests (
+            id SERIAL PRIMARY KEY,
+            repo_id BIGINT NOT NULL,
+            pr_id BIGINT NOT NULL UNIQUE,
+            pr_name TEXT,
+            merged_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL,
+            first_commit_at TIMESTAMPTZ,
+            base_branch TEXT,
+            commit_sha TEXT,
+            payload JSONB
+        );
+    """)
 
-    CREATE TABLE IF NOT EXISTS incidents (
-        id SERIAL PRIMARY KEY,
-        repo_id BIGINT NOT NULL,
-        issue_id BIGINT NOT NULL UNIQUE,
-        created_at TIMESTAMPTZ NOT NULL,
-        closed_at TIMESTAMPTZ,
-        is_incident BOOLEAN DEFAULT FALSE,
-        deployment_id BIGINT REFERENCES deployments(deployment_id) ON DELETE SET NULL,
-        payload JSONB
-    );
+    # Create incidents table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS incidents (
+            id SERIAL PRIMARY KEY,
+            repo_id BIGINT NOT NULL,
+            issue_id BIGINT NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL,
+            closed_at TIMESTAMPTZ,
+            is_incident BOOLEAN DEFAULT FALSE,
+            deployment_id BIGINT REFERENCES deployments(deployment_id) ON DELETE SET NULL,
+            payload JSONB
+        );
+    """)
 
-    CREATE TABLE IF NOT EXISTS deployment_prs (
-        deployment_id BIGINT NOT NULL REFERENCES deployments(deployment_id),
-        pr_id BIGINT NOT NULL REFERENCES pull_requests(pr_id),
-        PRIMARY KEY (deployment_id, pr_id)
-    );
+    # Create deployment_prs link table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS deployment_prs (
+            deployment_id BIGINT NOT NULL REFERENCES deployments(deployment_id),
+            pr_id BIGINT NOT NULL REFERENCES pull_requests(pr_id),
+            PRIMARY KEY (deployment_id, pr_id)
+        );
+    """)
 
-    CREATE TABLE IF NOT EXISTS dora_metrics (
-        id SERIAL PRIMARY KEY,
-        repo_id BIGINT NOT NULL,
-        metric_date DATE NOT NULL,
-        deployment_frequency INT DEFAULT 0,
-        lead_time_hours FLOAT DEFAULT 0,
-        change_failure_rate FLOAT DEFAULT 0,
-        mttr_hours FLOAT DEFAULT 0,
-        last_updated TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE(repo_id, metric_date)
-    );""")
+    # Create dora_metrics table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dora_metrics (
+            id SERIAL PRIMARY KEY,
+            repo_id BIGINT NOT NULL,
+            metric_date DATE NOT NULL,
+            deployment_frequency INT DEFAULT 0,
+            lead_time_hours FLOAT DEFAULT 0,
+            change_failure_rate FLOAT DEFAULT 0,
+            mttr_hours FLOAT DEFAULT 0,
+            last_updated TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(repo_id, metric_date)
+        );
+    """)
 
-    cursor.execute("""-- Indexes
+    # Create sync_state table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_state (
+            id SERIAL PRIMARY KEY,
+            last_webhook_at TIMESTAMPTZ DEFAULT NULL
+        );
+    """)
+
+    # Insert initial sync state if not present
+    cursor.execute("""
+        INSERT INTO sync_state (id) VALUES (1)
+        ON CONFLICT DO NOTHING;
+    """)
+
+    # Create indexes
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_deployments_repo ON deployments(repo_id);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_prs_repo ON pull_requests(repo_id);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_incidents_repo ON incidents(repo_id);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_metrics_repo_date ON dora_metrics(repo_id, metric_date);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_deployment_prs ON deployment_prs(deployment_id, pr_id);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_deployments_sha ON deployments(commit_sha);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_prs_sha ON pull_requests(commit_sha);
+    """)
+    cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_metrics_updated ON dora_metrics(last_updated);
     """)
+
+
+

@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 from db_utils import get_db_connection
 from github_auth import get_installation_token  # Import the GitHub App auth function
+from datetime import timezone
 
 # Remove GITHUB_TOKEN since we're using GitHub App auth now
 GITHUB_REPO = os.getenv("GITHUB_REPO")
@@ -92,30 +93,39 @@ def backfill():
         conn = get_db_connection()
         cursor = conn.cursor()
 
+        # Get last webhook timestamp from sync_state
+        cursor.execute("SELECT last_webhook_at FROM sync_state WHERE id = 1")
+        row = cursor.fetchone()
+        last_webhook_at = row[0] if row and row[0] else None
+        print(f"🕒 Last webhook received at: {last_webhook_at}")
+
         # 1. Fetch repository details
         print(f"⏳ Fetching repository details for {GITHUB_REPO}...")
         repo_data = github_get(f"https://api.github.com/repos/{GITHUB_REPO}").json()
         if 'id' not in repo_data:
             raise ValueError(f"Could not fetch repo data: {repo_data.get('message', 'Unknown error')}")
-        
+
         repo_id = repo_data['id']
         print(f"✅ Repository ID: {repo_id}")
 
         # 2. Fetch and process Pull Requests
         print("\n⏳ Fetching Pull Requests...")
         pr_count = 0
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/pulls?state=closed&per_page=100"
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/pulls?state=closed&sort=updated&direction=asc&per_page=100"
         while url:
             response = github_get(url)
             response.raise_for_status()
             prs = response.json()
-            
+
             for pr in prs:
+                updated_at = datetime.strptime(pr['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                if last_webhook_at and updated_at <= last_webhook_at:
+                    continue  # Skip old PRs
+
                 if pr.get('merged_at'):  # Only process merged PRs
                     insert_pull_request(cursor, pr, repo_id)
                     pr_count += 1
-            
-            # Progress indicator
+
             print(f"📦 Processed {pr_count} PRs so far...", end='\r')
             url = response.links.get('next', {}).get('url')
         print(f"\n✅ Processed {pr_count} total PRs")
@@ -128,20 +138,20 @@ def backfill():
             response = github_get(url)
             response.raise_for_status()
             deployments = response.json()
-            
+
             for deployment in deployments:
                 # Get the successful status for each deployment
                 statuses = github_get(deployment['statuses_url']).json()
-                success_status = next(
-                    (s for s in statuses if s['state'] == 'success'), 
-                    None
-                )
-                
+                success_status = next((s for s in statuses if s['state'] == 'success'), None)
+
                 if success_status:
+                    created_at = datetime.strptime(success_status['created_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                    if last_webhook_at and created_at <= last_webhook_at:
+                        continue  # Skip old deployments
+
                     insert_deployment(cursor, deployment, success_status, repo_id)
                     deployment_count += 1
-            
-            # Progress indicator
+
             print(f"🚀 Processed {deployment_count} deployments so far...", end='\r')
             url = response.links.get('next', {}).get('url')
         print(f"\n✅ Processed {deployment_count} total deployments")
@@ -150,22 +160,26 @@ def backfill():
         print("\n⏳ Fetching Issues...")
         issue_count = 0
         incident_count = 0
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/issues?state=all&per_page=100"
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/issues?state=all&sort=updated&direction=asc&per_page=100"
         while url:
             response = github_get(url)
             response.raise_for_status()
             issues = response.json()
-            
+
             for issue in issues:
-                if 'pull_request' not in issue:  # Only process actual issues, not PRs
-                    insert_incident(cursor, issue, repo_id)
-                    issue_count += 1
-                    
-                    # Count incidents specifically (you might want to add label detection)
-                    if any(label['name'].lower() in ['incident', 'bug'] for label in issue.get('labels', [])):
-                        incident_count += 1
-            
-            # Progress indicator
+                if 'pull_request' in issue:
+                    continue  # Skip PRs
+
+                updated_at = datetime.strptime(pr['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                if last_webhook_at and updated_at <= last_webhook_at:
+                    continue  # Skip old issues
+
+                insert_incident(cursor, issue, repo_id)
+                issue_count += 1
+
+                if any(label['name'].lower() in ['incident', 'bug'] for label in issue.get('labels', [])):
+                    incident_count += 1
+
             print(f"⚠️  Processed {issue_count} issues ({incident_count} incidents) so far...", end='\r')
             url = response.links.get('next', {}).get('url')
         print(f"\n✅ Processed {issue_count} total issues ({incident_count} incidents)")

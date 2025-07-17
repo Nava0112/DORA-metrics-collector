@@ -384,6 +384,9 @@ def webhook():
         # ✅ Recalculate metrics only for today
         process_repo_metrics(cursor, repo_id, start_time, end_time, metric_date)
 
+        cursor.execute("""
+            UPDATE sync_state SET last_webhook_at = NOW() WHERE id = 1
+        """)
         conn.commit()
         return jsonify({'status': 'success'}), 200
 
