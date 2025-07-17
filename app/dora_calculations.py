@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta
 import math
+import logging
+
+logger = logging.getLogger(__name__)
 
 def calculate_lead_time(first_commit, merged_at, deploy_time):
     if not merged_at:
@@ -28,12 +31,17 @@ def median(values):
         return (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
     return sorted_vals[mid]
 
-def detect_production_deployment(payload):
-    environment = payload.get('environment', '').lower()
-    if any(term in environment for term in ['prod', 'production', 'live']):
-        return True
-    workflow_run = payload.get('workflow_run', {})
-    workflow_name = workflow_run.get('name', '').lower() if workflow_run else ''
-    if any(term in workflow_name for term in ['deploy', 'prod', 'release']):
-        return True
+def detect_production_deployment(environment, payload):
+    try:
+        env = environment.lower() if environment else ''
+        if any(term in env for term in ['prod', 'production', 'live']):
+            return True
+
+        workflow_run = payload.get('workflow_run', {}) if payload else {}
+        workflow_name = workflow_run.get('name', '').lower()
+        if any(term in workflow_name for term in ['deploy', 'prod', 'release']):
+            return True
+    except Exception as e:
+        logger.warning(f"Error detecting production deployment: {e}")
     return False
+
