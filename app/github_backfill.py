@@ -4,7 +4,7 @@ import requests
 from datetime import datetime
 from db_utils import get_db_connection
 from github_auth import get_installation_token 
-from datetime import timezone
+from datetime import timezone , datetime
 
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 
@@ -199,11 +199,17 @@ def backfill():
             )
             WHERE i.repo_id = %s AND i.deployment_id IS NULL
         """, (repo_id,))
-        print(f" Linked {cursor.rowcount} incidents to deployments")
+
+        cursor.execute("SELECT COUNT(*) FROM incidents WHERE deployment_id IS NOT NULL AND repo_id = %s", (repo_id,))
+        linked_incidents = cursor.fetchone()[0]
+        print(f" Total incidents currently linked to deployments: {linked_incidents}")
+
+
+        current_time = datetime.now(timezone.utc)
+        cursor.execute("UPDATE sync_state SET last_webhook_at = %s WHERE id = 1", (current_time,))
+        print(f"\n Updated last_webhook_at to {current_time}")
 
         conn.commit()
-        print("\n Backfill completed successfully!")
-
     except Exception as e:
         print(f"\n Error during backfill: {str(e)}")
         if conn:
@@ -213,7 +219,7 @@ def backfill():
         if conn:
             cursor.close()
             conn.close()
-    print(" Backfill completed!")
+        print("\n Backfill completed successfully!")
 
 if __name__ == "__main__":
     backfill()
