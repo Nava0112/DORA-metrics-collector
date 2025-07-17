@@ -161,7 +161,7 @@ def backfill():
                 if 'pull_request' in issue:
                     continue  
 
-                updated_at = datetime.strptime(pr['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                updated_at = datetime.strptime(issue['updated_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
                 if last_webhook_at and updated_at <= last_webhook_at:
                     continue  
 
